@@ -1,5 +1,5 @@
-import { createReadStream, statSync, createWriteStream } from 'node:fs';
-import { Readable } from 'node:stream';
+import { createReadStream, statSync, createWriteStream, exists } from 'node:fs';
+import { on, Readable } from 'node:stream';
 import { FileManager, ReplicationLevel, FileInfo } from '@storagehub-sdk/core';
 import { TypeRegistry } from '@polkadot/types';
 import { AccountId20, H256 } from '@polkadot/types/interfaces';
@@ -8,6 +8,8 @@ import { getMspInfo, authenticateUser, mspClient } from '../services/mspService.
 import { DownloadResult, FileListResponse } from '@storagehub-sdk/msp-client';
 import { PalletFileSystemStorageRequestMetadata } from '@polkadot/types/lookup';
 import { storageHubClient, publicClient } from '../services/clientService.js';
+import { request } from 'node:http';
+import { chain } from '../config/networks.js';
 
 // ============================================================================
 // File Operations
@@ -47,8 +49,9 @@ export async function uploadFile(bucketId: `0x${string}`, filePath: string, file
 
   // The fingerprint is a content hash of the file (like a checksum).
   // It's stored on-chain so anyone can verify the file's integrity later.
-  const fingerprint = await fileManager.getFingerprint();
-  console.log(`Fingerprint: ${fingerprint.toHex()}`);
+  const fingerprintH256 = await fileManager.getFingerprint();
+  const fingerprint = fingerprintH256.toHex();
+  console.log(`Fingerprint: ${fingerprint}`);
 
   const fileSizeBigInt = BigInt(fileManager.getFileSize());
   console.log(`File size: ${fileSize} bytes`);
@@ -88,9 +91,9 @@ export async function uploadFile(bucketId: `0x${string}`, filePath: string, file
   const txHash: `0x${string}` | undefined = await storageHubClient.issueStorageRequest(
     bucketId,
     bucketFilePath,
-    fingerprint.toHex() as `0x${string}`,
+    fingerprint,
     fileSizeBigInt,
-    mspId as `0x${string}`,
+    mspId,
     peerIds,
     replicationLevel,
     replicas
@@ -117,7 +120,9 @@ export async function uploadFile(bucketId: `0x${string}`, filePath: string, file
   const registry = new TypeRegistry();
   const owner = registry.createType('AccountId20', account.address) as AccountId20;
   const bucketIdH256 = registry.createType('H256', bucketId) as H256;
-  const fileKey = await fileManager.computeFileKey(owner, bucketIdH256, bucketFilePath);
+  const fileKeyH256 = await fileManager.computeFileKey(owner, bucketIdH256, bucketFilePath);
+  const fileKey = fileKeyH256.toHex();
+  console.log(`Computed file key: ${fileKey}`);
 
   // Verify storage request on chain
   const storageRequest = await polkadotApi.query.fileSystem.storageRequests(fileKey);
@@ -131,7 +136,7 @@ export async function uploadFile(bucketId: `0x${string}`, filePath: string, file
   console.log('Storage request bucketId matches initial bucketId:', storageRequestData.bucketId === bucketId);
   console.log(
     'Storage request fingerprint matches initial fingerprint',
-    storageRequestData.fingerprint === fingerprint.toString()
+    storageRequestData.fingerprint === fingerprint
   );
 
   // -- Phase 3: Upload File Bytes to MSP --
@@ -145,9 +150,9 @@ export async function uploadFile(bucketId: `0x${string}`, filePath: string, file
   // The MSP receives: bucket ID, file key, file blob, fingerprint, owner address, and filename.
   const uploadReceipt = await mspClient.files.uploadFile(
     bucketId,
-    fileKey.toHex(),
+    fileKey,
     await fileManager.getFileBlob(),
-    fingerprint.toHex(),
+    fingerprint,
     address,
     bucketFilePath
   );
@@ -165,11 +170,11 @@ export async function uploadFile(bucketId: `0x${string}`, filePath: string, file
 // We just request the file stream from the MSP using the file key,
 // then pipe it to a local file.
 export async function downloadFile(
-  fileKey: H256,
+  fileKey: `0x${string}`,
   downloadPath: string
 ): Promise<{ path: string; size: number; mime?: string }> {
   // Download file from MSP
-  const downloadResponse: DownloadResult = await mspClient.files.downloadFile(fileKey.toHex());
+  const downloadResponse: DownloadResult = await mspClient.files.downloadFile(fileKey);
 
   // Check if the download response was successful
   if (downloadResponse.status !== 200) {

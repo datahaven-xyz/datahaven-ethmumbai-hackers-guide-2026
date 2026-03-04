@@ -4,9 +4,8 @@
 // Run: pnpm tsx src/file-manipulation.ts
 //
 // Unlike end-to-end.ts which uses the high-level uploadFile() helper,
-// this script breaks down the file upload process into individual steps
-// so you can see each piece in isolation:
-//
+// this script breaks down the file manipulation process that you're going to
+// be doing within the upload flow:
 //   Step 1: Initialize FileManager (wraps the file stream)
 //   Step 2: Compute fingerprint + gather MSP details
 //   Step 3: Issue a storage request on-chain
@@ -118,7 +117,8 @@ async function run() {
   const registry = new TypeRegistry();
   const owner = registry.createType('AccountId20', account.address) as AccountId20;
   const bucketIdH256 = registry.createType('H256', bucketId) as H256;
-  const fileKey = await fileManager.computeFileKey(owner, bucketIdH256, fileName);
+  const fileKeyH256 = await fileManager.computeFileKey(owner, bucketIdH256, fileName);
+  const fileKey = fileKeyH256.toHex();
 
   // -- Step 5: Retrieve Storage Request Data --
   // We read the storage request back from the chain to verify

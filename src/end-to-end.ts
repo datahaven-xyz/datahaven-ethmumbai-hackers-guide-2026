@@ -9,12 +9,11 @@
 //   3. Verify bucket (read from Substrate)
 //   4. Wait for MSP to index the bucket
 //   5. Upload a file (on-chain storage request + off-chain blob upload)
-//   6. Wait for MSP confirmation + BSP replication
+//   6. Wait for on-chain MSP confirmation
 //   7. Download the file back
 //   8. Verify byte-for-byte integrity
+//   9. Wait for file to be fully replicated
 //
-// This is the best script to demo first during the workshop — it shows
-// the full picture of how on-chain and off-chain layers work together.
 // ============================================================================
 
 import '@storagehub/api-augment';
@@ -43,7 +42,7 @@ async function run() {
   // -- Step 2: Create Bucket --
   // Change this name each time you run the script — bucket names
   // must be unique per wallet (the ID is derived from address + name).
-  const bucketName = 'INSERT-UNIQUE-NAME-HERE';
+  const bucketName = 'bucket-' + Date.now();
   const { bucketId, txReceipt } = await createBucket(bucketName);
   console.log(`Created Bucket ID: ${bucketId}`);
   console.log(`createBucket() txReceipt: ${txReceipt}`);
@@ -58,22 +57,18 @@ async function run() {
   // -- Step 5: Upload File --
   // import.meta.url gives us the current file's URL, so we can
   // resolve the sample image relative to this script regardless of cwd.
-  const fileName = 'bruce-the-moose.png';
+  const fileName = 'henloworld.txt';
   const filePath = new URL(`./files/${fileName}`, import.meta.url).pathname;
 
   const { fileKey, uploadReceipt } = await uploadFile(bucketId, filePath, fileName);
   console.log(`File uploaded: ${fileKey}`);
   console.log(`Status: ${uploadReceipt.status}`);
 
-  // -- Step 6: Wait for Confirmations --
-  // Two waits here:
-  //   a) waitForMSPConfirmOnChain — MSP tells the chain it accepted the file
-  //   b) waitForBackendFileReady — BSPs replicate and file status becomes "ready"
-  await waitForMSPConfirmOnChain(fileKey.toHex());
-  await waitForBackendFileReady(bucketId, fileKey.toHex());
+  // -- Step 6: Wait for MSP to tell the chain it accepted the file --
+  await waitForMSPConfirmOnChain(fileKey);
 
   // -- Step 7: Download File --
-  const downloadedFilePath = new URL('./files/bruce-the-moose-downloaded.png', import.meta.url).pathname;
+  const downloadedFilePath = new URL(`./files/henloworld-downloaded.txt`, import.meta.url).pathname;
   const downloadedFile = await downloadFile(fileKey, downloadedFilePath);
   console.log(`File type: ${downloadedFile.mime}`);
   console.log(`Downloaded ${downloadedFile.size} bytes to ${downloadedFile.path}`);
@@ -83,6 +78,11 @@ async function run() {
   // are identical to what we originally uploaded.
   const isValid = await verifyDownload(filePath, downloadedFilePath);
   console.log(`File integrity verified: ${isValid ? 'PASSED' : 'FAILED'}`);
+
+  // -- Step 9: Wait for Backend to be Fully Ready --
+  // Wait for BSPs to fully replicate and
+  // the file status to become "ready"
+  await waitForBackendFileReady(bucketId, fileKey);
 
   console.log('DataHaven Storage End-to-End Script Completed Successfully.');
 
