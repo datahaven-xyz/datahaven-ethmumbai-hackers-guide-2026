@@ -7,12 +7,11 @@
 //   1. Health check
 //   2. Create bucket (on-chain tx)
 //   3. Verify bucket (read from Substrate)
-//   4. Wait for MSP to index the bucket
-//   5. Upload a file (on-chain storage request + off-chain blob upload)
-//   6. Wait for on-chain MSP confirmation
-//   7. Download the file back
-//   8. Verify byte-for-byte integrity
-//   9. Wait for file to be fully replicated
+//   4. Upload a file (on-chain storage request + off-chain blob upload)
+//   5. Wait for on-chain MSP confirmation
+//   6. Download the file back
+//   7. Verify byte-for-byte integrity
+//   8. Wait for file to be fully replicated
 //
 // ============================================================================
 
@@ -23,12 +22,14 @@ import {
   downloadFile,
   uploadFile,
   verifyDownload,
-  waitForBackendFileReady,
+  waitForBackendFileAvailable,
+  waitForFileReplicationComplete,
   waitForMSPConfirmOnChain,
 } from './operations/fileOperations.js';
 import { HealthStatus } from '@storagehub-sdk/msp-client';
 import { mspClient } from './services/mspService.js';
-import { createBucket, verifyBucketCreation, waitForBackendBucketReady } from './operations/bucketOperations.js';
+import { createBucket, verifyBucketCreation } from './operations/bucketOperations.js';
+import { fileURLToPath } from 'node:url';
 
 async function run() {
   await initWasm();
@@ -51,38 +52,38 @@ async function run() {
   const bucketData = await verifyBucketCreation(bucketId);
   console.log('Bucket data:', bucketData);
 
-  // -- Step 4: Wait for MSP Backend --
-  await waitForBackendBucketReady(bucketId);
-
-  // -- Step 5: Upload File --
+  // -- Step 4: Upload File --
   // import.meta.url gives us the current file's URL, so we can
   // resolve the sample image relative to this script regardless of cwd.
   const fileName = 'henloworld.txt';
-  const filePath = new URL(`./files/${fileName}`, import.meta.url).pathname;
+  const filePath = fileURLToPath(new URL(`./files/${fileName}`, import.meta.url));
 
   const { fileKey, uploadReceipt } = await uploadFile(bucketId, filePath, fileName);
   console.log(`File uploaded: ${fileKey}`);
-  console.log(`Status: ${uploadReceipt.status}`);
+  console.log(`Status: ${uploadReceipt?.status}`);
 
-  // -- Step 6: Wait for MSP to tell the chain it accepted the file --
+  // -- Step 5: Wait for MSP to tell the chain it accepted the file --
   await waitForMSPConfirmOnChain(fileKey);
+  await waitForBackendFileAvailable(bucketId, fileKey);
 
-  // -- Step 7: Download File --
-  const downloadedFilePath = new URL(`./files/henloworld-downloaded.txt`, import.meta.url).pathname;
+  // -- Step 6: Download File --
+  // const downloadedFilePath = fileURLToPath(new URL(`./files/henloworld-downloaded.txt`, import.meta.url));
+  const downloadedFilePath = new URL(`./files/downloaded/henloworld-downloaded.txt`, import.meta.url).pathname;
   const downloadedFile = await downloadFile(fileKey, downloadedFilePath);
   console.log(`File type: ${downloadedFile.mime}`);
   console.log(`Downloaded ${downloadedFile.size} bytes to ${downloadedFile.path}`);
 
-  // -- Step 8: Verify Integrity --
+  // -- Step 7: Verify Integrity --
   // This proves the file wasn't corrupted — the downloaded bytes
   // are identical to what we originally uploaded.
   const isValid = await verifyDownload(filePath, downloadedFilePath);
   console.log(`File integrity verified: ${isValid ? 'PASSED' : 'FAILED'}`);
 
-  // -- Step 9: Wait for Backend to be Fully Ready --
-  // Wait for BSPs to fully replicate and
-  // the file status to become "ready"
-  await waitForBackendFileReady(bucketId, fileKey);
+  // -- Step 8: Wait for Full Replication --
+  // Wait for BSPs to fully replicate the file.
+  // The file should transition from "inProgress" → "ready".
+  const finalFileInfo = await waitForFileReplicationComplete(bucketId, fileKey);
+  console.log(`Final file status: ${finalFileInfo.status}`);
 
   console.log('DataHaven Storage End-to-End Script Completed Successfully.');
 

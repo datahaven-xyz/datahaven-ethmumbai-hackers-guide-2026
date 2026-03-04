@@ -25,6 +25,7 @@ import { Readable } from 'stream';
 import { getMspInfo } from './services/mspService.js';
 import { TypeRegistry } from '@polkadot/types';
 import { AccountId20, H256 } from '@polkadot/types/interfaces';
+import { fileURLToPath } from 'node:url';
 
 async function run() {
   await initWasm();
@@ -34,7 +35,7 @@ async function run() {
   const bucketId: `0x${string}` = 'INSERT-UNIQUE-BUCKET-ID-HERE' as `0x${string}`;
 
   const fileName = 'bruce-the-moose.png';
-  const filePath = new URL(`./files/${fileName}`, import.meta.url).pathname;
+  const filePath = fileURLToPath(new URL(`./files/${fileName}`, import.meta.url));
 
   // -- Step 1: Initialize FileManager --
   // FileManager wraps a file as a lazy stream. The stream factory

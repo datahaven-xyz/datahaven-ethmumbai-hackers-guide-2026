@@ -148,7 +148,7 @@ export async function uploadFile(bucketId: `0x${string}`, filePath: string, file
 
   // This is where the actual file data leaves your machine and goes to the MSP.
   // The MSP receives: bucket ID, file key, file blob, fingerprint, owner address, and filename.
-  const uploadReceipt = await mspClient.files.uploadFile(
+  const uploadReceipt = await uploadFileToMSPWithRetry(
     bucketId,
     fileKey,
     await fileManager.getFileBlob(),
@@ -156,11 +156,6 @@ export async function uploadFile(bucketId: `0x${string}`, filePath: string, file
     address,
     bucketFilePath
   );
-  console.log('File upload receipt:', uploadReceipt);
-
-  if (uploadReceipt.status !== 'upload_successful') {
-    throw new Error('File upload to MSP failed');
-  }
 
   return { fileKey, uploadReceipt };
 }
@@ -175,7 +170,6 @@ export async function downloadFile(
 ): Promise<{ path: string; size: number; mime?: string }> {
   // Download file from MSP
   const downloadResponse: DownloadResult = await mspClient.files.downloadFile(fileKey);
-
   // Check if the download response was successful
   if (downloadResponse.status !== 200) {
     throw new Error(`Download failed with status: ${downloadResponse.status}`);
@@ -217,6 +211,59 @@ export async function verifyDownload(originalPath: string, downloadedPath: strin
   const downloadedBuffer = await import('node:fs/promises').then((fs) => fs.readFile(downloadedPath));
 
   return originalBuffer.equals(downloadedBuffer);
+}
+
+// uploadFileToMSPWithRetry()
+// After issuing a storage request on-chain, the MSP may not have picked it up yet.
+// This function retries the file upload until the MSP accepts it.
+async function uploadFileToMSPWithRetry(
+  bucketId: `0x${string}`,
+  fileKey: `0x${string}`,
+  fileBlob: Blob,
+  fingerprint: `0x${string}`,
+  address: `0x${string}`,
+  bucketFilePath: string
+) {
+  const maxAttempts = 10; // Number of upload attempts
+  const delayMs = 1000; // Delay between attempts in milliseconds
+
+  for (let i = 0; i < maxAttempts; i++) {
+    console.log(`Uploading file to MSP, attempt ${i + 1} of ${maxAttempts}...`);
+
+    try {
+      const uploadReceipt = await mspClient.files.uploadFile(
+        bucketId,
+        fileKey,
+        fileBlob,
+        fingerprint,
+        address,
+        bucketFilePath
+      );
+
+      if (uploadReceipt.status === 'upload_successful') {
+        console.log('File upload receipt:', uploadReceipt);
+        return uploadReceipt;
+      }
+
+      // Non-successful status — retryable
+      console.log(`Upload status is "${uploadReceipt.status}", waiting...`);
+    } catch (error: any) {
+      // Backend hasn't indexed the storage request yet
+      if (error.status === 404 || error.body.error === 'Not found: Record') {
+        console.log(`Storage request not found in MSP backend yet (404).`);
+      } else {
+        // Any other error is unexpected and should fail the entire workflow
+        console.log('Unexpected error while uploading file to MSP:', error);
+        throw error;
+      }
+    }
+
+    // Wait before retrying
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  // All attempts exhausted
+  throw new Error('Timed out waiting for file upload to MSP');
 }
 
 // waitForMSPConfirmOnChain()
@@ -262,15 +309,17 @@ export async function waitForMSPConfirmOnChain(fileKey: `0x${string}`) {
   throw new Error('Timed out waiting for MSP confirmation on-chain');
 }
 
-// waitForBackendFileReady()
-// After the MSP confirms on-chain, the file still needs to be replicated by BSPs
-// (Backup Storage Providers) before it's considered fully stored.
-// This can take up to ~11 minutes. The file transitions through statuses:
-//   pending → ready    (success)
-//   pending → revoked  (user cancelled)
-//   pending → rejected (MSP refused)
-//   pending → expired  (BSPs didn't replicate in time)
-export async function waitForBackendFileReady(bucketId: `0x${string}`, fileKey: `0x${string}`) {
+// waitForBackendFileAvailable()
+// After the MSP confirms on-chain, the file needs to be indexed in the backend
+// before it can be downloaded. This polls until the file is available (status
+// "ready" or "inProgress"), meaning the MSP has it and can serve it.
+// The file transitions through statuses:
+//   pending → inProgress (MSP has it, BSPs still replicating — downloadable)
+//   pending → ready      (fully replicated — downloadable)
+//   pending → revoked    (user cancelled)
+//   pending → rejected   (MSP refused)
+//   pending → expired    (BSPs didn't replicate in time)
+export async function waitForBackendFileAvailable(bucketId: `0x${string}`, fileKey: `0x${string}`) {
   // wait up to 12 minutes (144 attempts x 5 seconds)
   // 11 minutes is the amount of time BSPs have to reach the required replication level
   const maxAttempts = 144; // Number of polling attempts
@@ -284,7 +333,7 @@ export async function waitForBackendFileReady(bucketId: `0x${string}`, fileKey: 
       const fileInfo = await mspClient.files.getFileInfo(bucketId, fileKey);
 
       // File is fully ready — backend has indexed it and can serve it
-      if (fileInfo.status === 'ready') {
+      if (fileInfo.status === 'ready' || fileInfo.status === 'inProgress') {
         console.log('File found in MSP backend:', fileInfo);
         return fileInfo;
       }
@@ -319,6 +368,53 @@ export async function waitForBackendFileReady(bucketId: `0x${string}`, fileKey: 
 
   // All attempts exhausted
   throw new Error('Timed out waiting for MSP backend to mark file as ready');
+}
+
+// waitForFileReplicationComplete()
+// After the file is available for download, BSPs still need to fully replicate it.
+// This polls until the file reaches a terminal state:
+//   "ready"   — BSPs replicated successfully (ideal outcome)
+//   "revoked" — user cancelled
+//   "rejected"— MSP refused
+//   "expired" — BSPs didn't replicate in time
+// Unlike waitForBackendFileAvailable, this does NOT accept "inProgress" as a
+// success condition — it waits for the replication process to fully resolve.
+export async function waitForFileReplicationComplete(bucketId: `0x${string}`, fileKey: `0x${string}`) {
+  // wait up to 12 minutes (144 attempts x 5 seconds)
+  // 11 minutes is the amount of time BSPs have to reach the required replication level
+  const maxAttempts = 144; // Number of polling attempts
+  const delayMs = 5000; // Delay between attempts in milliseconds
+
+  for (let i = 0; i < maxAttempts; i++) {
+    console.log(`Waiting for file replication to complete, attempt ${i + 1} of ${maxAttempts}...`);
+
+    try {
+      const fileInfo = await mspClient.files.getFileInfo(bucketId, fileKey);
+
+      // Terminal states — replication has resolved one way or another
+      const terminalStatuses = ['ready', 'revoked', 'rejected', 'expired'];
+      if (terminalStatuses.includes(fileInfo.status)) {
+        console.log(`File reached terminal status: "${fileInfo.status}"`, fileInfo);
+        return fileInfo;
+      }
+
+      // Still in progress — BSPs are replicating
+      console.log(`File status is "${fileInfo.status}", waiting for replication...`);
+    } catch (error: any) {
+      if (error?.status === 404 || error?.body?.error === 'Not found: Record') {
+        console.log('File not yet indexed in MSP backend (404 Not Found). Waiting before retry...');
+      } else {
+        console.log('Unexpected error while fetching file from MSP:', error);
+        throw error;
+      }
+    }
+
+    // Wait before polling again
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  // All attempts exhausted
+  throw new Error('Timed out waiting for file replication to complete');
 }
 
 export async function getBucketFilesFromMSP(bucketId: `0x${string}`): Promise<FileListResponse> {
