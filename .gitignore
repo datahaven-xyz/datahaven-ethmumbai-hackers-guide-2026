@@ -1,0 +1,8 @@
+node_modules
+dist
+.env
+src/files/bruce-the-moose-downloaded.png
+
+.github/instructions/kluster-code-verify.instructions.md
+.kluster
+.claude
